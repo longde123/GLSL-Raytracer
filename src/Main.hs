@@ -35,7 +35,7 @@ windowConf :: SDL.WindowConfig
 windowConf = SDL.defaultWindow { SDL.windowOpenGL = Just SDL.defaultOpenGL { SDL.glProfile = glProfile } }
 
 glProfile :: SDL.Profile
-glProfile = SDL.Compatibility SDL.Normal 3 1
+glProfile = SDL.Compatibility SDL.Normal 3 2
 
 main :: IO ()
 main = runSDL $ do

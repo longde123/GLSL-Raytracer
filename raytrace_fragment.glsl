@@ -1,4 +1,4 @@
-#version 140
+#version 150
 
 uniform ivec3 u_size;
 uniform isamplerBuffer u_voxels;
@@ -20,13 +20,11 @@ ivec4 voxelAt(ivec3 pos) {
 }
 
 float distToNextCellLine(float posInCell, float delta) {
-  if (delta >= 0) return (1 - posInCell) / delta;
-  return (- posInCell) / delta;
+  return (max(0, sign(delta)) - posInCell) / delta;
 }
 
 float stepLen(float delta) {
-  if (delta >= 0) return 1 / delta;
-  return - 1 / delta;
+  return sign(delta) / delta;
 }
 
 bool isInside(ivec3 pos) {
@@ -44,32 +42,18 @@ ivec4 shootRay(vec3 startPos, vec3 dir, out float dist) {
     distToNextCellLine(posInCell.x, dir.x),
     distToNextCellLine(posInCell.y, dir.y),
     distToNextCellLine(posInCell.z, dir.z));
-
   ivec4 voxelCol = ivec4(0, 0, 0, 0);
+
   if (!isInside(cell)) return voxelCol;
 
   while (true) {
-    if (next.x < next.y) {
-      if (next.x < next.z) {
-        dist = next.x;
-        next.x += stepLine.x;
-        cell.x += inc.x;
-      } else {
-        dist = next.z;
-        next.z += stepLine.z;
-        cell.z += inc.z;
-      }
-    } else {
-      if (next.y < next.z) {
-        dist = next.y;
-        next.y += stepLine.y;
-        cell.y += inc.y;
-      } else {
-        dist = next.z;
-        next.z += stepLine.z;
-        cell.z += inc.z;
-      }
-    }
+    vec3 cp = step(next, next.yzx);
+    vec3 mask = cp * (vec3(1.0) - cp.zxy);
+    
+    next += stepLine * mask;
+    cell += inc * ivec3(mask);
+    dist = dot(next, mask);
+
     if (!isInside(cell)) return voxelCol;
     voxelCol = voxelAt(cell);
     if (voxelCol.a != 0) return voxelCol;
