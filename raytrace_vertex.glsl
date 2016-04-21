@@ -1,6 +1,8 @@
+#version 140
+
 attribute vec2 position;
 
-varying out vec2 fragmentPosition;
+varying vec2 fragmentPosition;
 
 void main() {
     fragmentPosition = position;

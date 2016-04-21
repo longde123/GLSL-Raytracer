@@ -1,32 +1,66 @@
 module Main where
 
-import Graphics.UI.GLUT
+import qualified SDL
 import Graphics.Rendering.OpenGL
 import Foreign
-import Data.IORef
 import Data.Array.Storable hiding ((!))
 import qualified Data.ByteString.Lazy as BS
 import Data.Binary.Get
 import Data.Maybe
+import Data.IORef
 import Linear
 import Graphics.GL
 import qualified Data.Array.Repa as Repa
 import qualified Data.Array.Repa.Repr.ForeignPtr as Repa
 import Data.Array.Repa (Z(..), (:.)(..), (!), DIM2, DIM3, U, D)
 import Control.Monad
-import Data.Time.Clock.POSIX
 
 import VoxelLoader
 import DotVox
+import SDLUtils
+import Loop
+import FrameMeasure
+
+data State
+  = State
+  { window :: SDL.Window
+  , sdlRenderer :: SDL.Renderer
+  , vertexArray :: Ptr Float
+  , voxelTex :: TextureObject
+  , context :: SDL.GLContext
+  , frameMeasure :: IORef FrameMeasure
+  }
+
+windowConf :: SDL.WindowConfig
+windowConf = SDL.defaultWindow { SDL.windowOpenGL = Just SDL.defaultOpenGL { SDL.glProfile = glProfile } }
+
+glProfile :: SDL.Profile
+glProfile = SDL.Compatibility SDL.Normal 3 1
 
 main :: IO ()
-main = do
-    (progName, args) <- getArgsAndInitialize
-    window <- createWindow "Hello World"
+main = runSDL $ do
+    quadArray <- mkQuadArray
+    withWindow "SDL + OpenGL" windowConf $ \window ->
+      withRenderer SDL.defaultRenderer window $ \sdlRenderer ->
+        withStorableArray quadArray $ \arrayPtr -> do
+          SDL.showWindow window
+          state <- initializeState arrayPtr window sdlRenderer
+          loop 1000 state renderFullscreenQuad
+  where
+    mkQuadArray = newListArray (0, length quad - 1) quad
+    quad = [ -1, -1
+           ,  1, -1
+           , -1,  1
+           ,  1, -1
+           ,  1,  1
+           , -1,  1 ] :: [Float]
+initializeState :: Ptr Float -> SDL.Window -> SDL.Renderer -> IO State
+initializeState arrayPtr window sdlRenderer = do
+    ctx <- SDL.glCreateContext window
 
     putStr "loading .vox... "
     -- load voxels from .vox
-    dotVox <- runGet getDotVox <$> BS.readFile "dragon.vox"
+    dotVox <- runGet getDotVox <$> BS.readFile "chr_sword.vox"
     let voxels = fromJust $ voxelsFromDotVox dotVox
     let (Z :. w :. h :. d) = Repa.extent voxels
     putStrLn "done."
@@ -48,8 +82,8 @@ main = do
     putStrLn "done."
 
     -- setup shader
-    vertSource <- readFile "vertex.glsl"
-    fragSource <- readFile "fragment.glsl"
+    vertSource <- readFile "raytrace_vertex.glsl"
+    fragSource <- readFile "raytrace_fragment.glsl"
 
     program <- loadShaderProgram vertSource fragSource
 
@@ -62,56 +96,41 @@ main = do
     uniform uSize $= Vertex3 (fromIntegral w :: GLint) (fromIntegral h) (fromIntegral d)
     uniform uVoxels $= (0 :: GLint)
 
-    -- render with vertex array object
-    quadArray <- mkQuadArray
-    time <- round . (* 1000) <$> getPOSIXTime
-    lastSecondRef <- newIORef time
-    framesCountRef <- newIORef 0
-    withStorableArray quadArray $ \arrayPtr -> do
-      displayCallback $= renderFullscreenQuad lastSecondRef framesCountRef arrayPtr voxelTex
-      mainLoop
-  where
-    mkQuadArray = newListArray (0, length quad - 1) quad
-    quad = [ -1, -1
-           ,  1, -1
-           , -1,  1
-           ,  1, -1
-           ,  1,  1
-           , -1,  1 ] :: [Float]
+    frame <- initFrameMeasure
+    frameRef <- newIORef frame
+    return State
+      { window = window
+      , sdlRenderer = sdlRenderer
+      , vertexArray = arrayPtr
+      , voxelTex = voxelTex
+      , context = ctx
+      , frameMeasure = frameRef }
 
-renderFullscreenQuad :: IORef Int -> IORef Int -> Ptr Float -> TextureObject -> IO ()
-renderFullscreenQuad lastSecondRef framesCountRef arrayPtr voxelTex = do
+
+renderFullscreenQuad :: State -> IO (State, Bool)
+renderFullscreenQuad state = do
+    events <- SDL.pollEvents
+    let quit = any (== SDL.QuitEvent) $ map SDL.eventPayload events
+
     clear [ ColorBuffer ]
 
     vertexAttribArray (AttribLocation 0) $= Enabled
     vertexAttribPointer (AttribLocation 0) $= (ToFloat, descriptor)
 
     glActiveTexture GL_TEXTURE0
-    textureBinding TextureBuffer' $= Just voxelTex
+    textureBinding TextureBuffer' $= Just (voxelTex state)
 
     drawArrays Triangles 0 6
 
     vertexAttribArray (AttribLocation 0) $= Disabled
 
-    flush
+    SDL.glSwapWindow (window state)
 
-    maybePrintFPS lastSecondRef framesCountRef
+    measureFramerate (frameMeasure state)
 
-    postRedisplay Nothing
+    return (state, quit)
   where
-    descriptor = VertexArrayDescriptor 2 Float (2 * 4) arrayPtr
-
-maybePrintFPS :: IORef Int -> IORef Int -> IO ()
-maybePrintFPS lastSecondRef framesCountRef = do
-    modifyIORef framesCountRef (+ 1)
-    time <- round . (* 1000) <$> getPOSIXTime
-    lastSecond <- readIORef lastSecondRef
-    let sinceLastSecond = time - lastSecond
-    when (sinceLastSecond >= 1000) $ do
-      frames <- readIORef framesCountRef
-      putStrLn $ "Fps: " ++ show frames ++ " (" ++ show (1000.0 / fromIntegral frames) ++ " ms)"
-      writeIORef framesCountRef 0
-      writeIORef lastSecondRef time
+    descriptor = VertexArrayDescriptor 2 Float (2 * 4) (vertexArray state)
 
 loadShaderProgram :: String -> String -> IO Program
 loadShaderProgram vertSource fragSource = do
@@ -132,6 +151,7 @@ loadShaderObject shaderType source = do
     shaderSourceBS shader $= packUtf8 source
     compileShader shader
     infoLog <- get $ shaderInfoLog shader
+    putStrLn $ show shaderType ++ " info log:\n" ++ infoLog
     return shader
 
 glGenBuffer :: IO GLuint
